@@ -1,0 +1,130 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <time.h>
+
+const char* ssid = "TOBY"; 
+const char* password = "Caro.#.#."; 
+const int ID_FILTRO_DISPOSITIVO = 1;
+const char* API_ENDPOINT = "https://api-hoqw.onrender.com/captura";
+const char* API_ERROR_ENDPOINT = "https://api-hoqw.onrender.com/error_log"; 
+
+const int PIN_TDS = A0; 
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", -10800); 
+WiFiClientSecure wifiClient; 
+HTTPClient http;
+
+void enviarLogDeError(const char* tipoError, const char* mensaje) {
+  if (WiFi.status() != WL_CONNECTED) return; 
+
+  timeClient.update();
+  time_t rawTime = timeClient.getEpochTime();
+  struct tm * ti;
+  ti = localtime(&rawTime);
+  char fechaFormateada[25]; 
+  strftime(fechaFormateada, sizeof(fechaFormateada), "%Y-%m-%d %H:%M:%S", ti);
+
+  DynamicJsonDocument errorDoc(300); 
+  errorDoc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO;
+  errorDoc["Fecha_Error"] = fechaFormateada; 
+  errorDoc["Tipo_Error"] = tipoError;
+  errorDoc["Mensaje"] = mensaje;
+  
+  String errorPayload;
+  serializeJson(errorDoc, errorPayload); 
+
+  WiFiClientSecure errorClient;
+  errorClient.setInsecure(); 
+
+  HTTPClient errorHttp;
+  if (errorHttp.begin(errorClient, API_ERROR_ENDPOINT)) { 
+    errorHttp.addHeader("Content-Type", "application/json");
+    errorHttp.POST(errorPayload);
+    errorHttp.end();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n--- INICIANDO MONITOR TDS (v14.0) ---");
+  
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando WiFi");
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\n¡Conectado!");
+  
+  timeClient.begin();
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    
+    timeClient.update();
+    time_t rawTime = timeClient.getEpochTime();
+    struct tm * ti;
+    ti = localtime(&rawTime);
+    char fechaFormateada[25]; 
+    strftime(fechaFormateada, sizeof(fechaFormateada), "%Y-%m-%d %H:%M:%S", ti);
+    int valorTDS = analogRead(PIN_TDS);
+    if (valorTDS <= 0) valorTDS = 1;
+    float ph_float = 7.2;
+    float flujo_float = 1.8; 
+    char ph_str[5];
+    char flujo_str[5];
+    sprintf(ph_str, "%.1f", ph_float);
+    sprintf(flujo_str, "%.1f", flujo_float);
+    Serial.printf("Enviando: TDS=%d, PH=%s, Flujo=%s\n", valorTDS, ph_str, flujo_str);
+    
+    DynamicJsonDocument jsonDoc(256); 
+    jsonDoc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO; 
+    jsonDoc["fecha"] = fechaFormateada; 
+    jsonDoc["ph"] = ph_str; 
+    jsonDoc["tds"] = valorTDS;
+    jsonDoc["flujo"] = flujo_str; 
+    String payload;
+    serializeJson(jsonDoc, payload); 
+    wifiClient.setInsecure();
+
+    if (http.begin(wifiClient, API_ENDPOINT)) { 
+      http.addHeader("Content-Type", "application/json");
+      int httpCode = http.POST(payload);
+      
+      if (httpCode > 0) {
+        if(httpCode == 200) {
+          Serial.println(">> ¡¡ÉXITO!! Datos agregados a la DB.");
+        } else {
+          String responseBody = http.getString();
+          Serial.printf(">> Respuesta Servidor NO OK: %d - %s\n", httpCode, responseBody.c_str());
+          enviarLogDeError("API_FAILURE", responseBody.c_str()); 
+        }
+      } else {
+        String errorStr = http.errorToString(httpCode);
+        Serial.printf(">> ERROR: Fallo al llegar al servidor: %s\n", errorStr.c_str());
+        enviarLogDeError("CONNECTION_TIMEOUT", errorStr.c_str()); 
+      }
+      http.end();
+    } else {
+        Serial.println(">> ERROR CRÍTICO: Fallo al iniciar conexión HTTP/S.");
+        enviarLogDeError("HTTP_INIT_FAILED", "Fallo al iniciar conexión.");
+    }
+  } else {
+    Serial.println("Reconectando WiFi...");
+    WiFi.begin(ssid, password);
+  }
+  Serial.println("Esperando 5 segundos...");
+  delay(5000); 
+}
+
+
+
+
+
+
+
+
+
+
