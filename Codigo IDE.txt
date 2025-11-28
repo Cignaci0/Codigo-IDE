@@ -1,3 +1,4 @@
+
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -5,126 +6,118 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <time.h>
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h> 
 
 const char* ssid = "TOBY"; 
 const char* password = "Caro.#.#."; 
 const int ID_FILTRO_DISPOSITIVO = 1;
+
 const char* API_ENDPOINT = "https://api-hoqw.onrender.com/captura";
 const char* API_ERROR_ENDPOINT = "https://api-hoqw.onrender.com/error_log"; 
 
-const int PIN_TDS = A0; 
+const float VOLTAJE_PH7 = 2.556; 
+
+const float FACTOR_TDS = 267.0; 
+
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", -10800); 
 WiFiClientSecure wifiClient; 
 HTTPClient http;
+Adafruit_ADS1115 ads; 
 
 void enviarLogDeError(const char* tipoError, const char* mensaje) {
-  if (WiFi.status() != WL_CONNECTED) return; 
-
+  if (WiFi.status() != WL_CONNECTED) return;
   timeClient.update();
   time_t rawTime = timeClient.getEpochTime();
-  struct tm * ti;
-  ti = localtime(&rawTime);
-  char fechaFormateada[25]; 
-  strftime(fechaFormateada, sizeof(fechaFormateada), "%Y-%m-%d %H:%M:%S", ti);
+  struct tm * ti = localtime(&rawTime);
+  char fecha[25]; strftime(fecha, sizeof(fecha), "%Y-%m-%d %H:%M:%S", ti);
 
-  DynamicJsonDocument errorDoc(300); 
-  errorDoc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO;
-  errorDoc["Fecha_Error"] = fechaFormateada; 
-  errorDoc["Tipo_Error"] = tipoError;
-  errorDoc["Mensaje"] = mensaje;
-  
-  String errorPayload;
-  serializeJson(errorDoc, errorPayload); 
+  DynamicJsonDocument doc(300); 
+  doc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO;
+  doc["Fecha_Error"] = fecha; 
+  doc["Tipo_Error"] = tipoError;
+  doc["Mensaje"] = mensaje;
+  String payload; serializeJson(doc, payload); 
 
-  WiFiClientSecure errorClient;
-  errorClient.setInsecure(); 
-
-  HTTPClient errorHttp;
-  if (errorHttp.begin(errorClient, API_ERROR_ENDPOINT)) { 
-    errorHttp.addHeader("Content-Type", "application/json");
-    errorHttp.POST(errorPayload);
-    errorHttp.end();
+  WiFiClientSecure client; client.setInsecure(); 
+  HTTPClient httpErr;
+  if (httpErr.begin(client, API_ERROR_ENDPOINT)) { 
+    httpErr.addHeader("Content-Type", "application/json");
+    httpErr.POST(payload);
+    httpErr.end();
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- INICIANDO MONITOR TDS (v14.0) ---");
-  
+  Wire.begin(4, 5); 
+  if (!ads.begin()) {
+    Serial.println("ERROR CRÍTICO: ADS1115 no responde.");
+    while (1); 
+  }
+  Serial.println("Sensores OK. Iniciando lecturas...");
+
   WiFi.begin(ssid, password);
   Serial.print("Conectando WiFi");
   while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.println("\n¡Conectado!");
+  Serial.println(" OK!");
   
   timeClient.begin();
 }
 
 void loop() {
   if (WiFi.status() == WL_CONNECTED) {
-    
+
+    int16_t adc0 = ads.readADC_SingleEnded(0);
+    float voltaje_ph = ads.computeVolts(adc0);
+    float ph_real = 7.0 + ((VOLTAJE_PH7 - voltaje_ph) / 0.18);
+
+    int16_t adc1 = ads.readADC_SingleEnded(1);
+    float voltaje_tds = ads.computeVolts(adc1);
+    float tds_real = voltaje_tds * FACTOR_TDS; 
+    if (tds_real < 0) tds_real = 0;
+
+    float flujo_simulado = random(180, 280) / 100.0; 
+
+    Serial.println("-------------------------");
+    Serial.printf("pH: %.2f (v: %.2f)\n", ph_real, voltaje_ph);
+    Serial.printf("TDS: %.0f ppm (v: %.2f)\n", tds_real, voltaje_tds);
+    Serial.printf("Flujo: %.2f L/min\n", flujo_simulado);
+
     timeClient.update();
     time_t rawTime = timeClient.getEpochTime();
-    struct tm * ti;
-    ti = localtime(&rawTime);
-    char fechaFormateada[25]; 
-    strftime(fechaFormateada, sizeof(fechaFormateada), "%Y-%m-%d %H:%M:%S", ti);
-    int valorTDS = analogRead(PIN_TDS);
-    if (valorTDS <= 0) valorTDS = 1;
-    float ph_float = 7.2;
-    float flujo_float = 1.8; 
-    char ph_str[5];
-    char flujo_str[5];
-    sprintf(ph_str, "%.1f", ph_float);
-    sprintf(flujo_str, "%.1f", flujo_float);
-    Serial.printf("Enviando: TDS=%d, PH=%s, Flujo=%s\n", valorTDS, ph_str, flujo_str);
-    
-    DynamicJsonDocument jsonDoc(256); 
-    jsonDoc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO; 
-    jsonDoc["fecha"] = fechaFormateada; 
-    jsonDoc["ph"] = ph_str; 
-    jsonDoc["tds"] = valorTDS;
-    jsonDoc["flujo"] = flujo_str; 
-    String payload;
-    serializeJson(jsonDoc, payload); 
-    wifiClient.setInsecure();
+    struct tm * ti = localtime(&rawTime);
+    char fecha[25]; strftime(fecha, sizeof(fecha), "%Y-%m-%d %H:%M:%S", ti);
 
+    char ph_s[6], flu_s[6];
+    sprintf(ph_s, "%.2f", ph_real);
+    sprintf(flu_s, "%.1f", flujo_simulado);
+
+    DynamicJsonDocument doc(256); 
+    doc["ID_Filtro"] = ID_FILTRO_DISPOSITIVO; 
+    doc["fecha"] = fecha; 
+    doc["ph"] = ph_s; 
+    doc["tds"] = (int)tds_real; 
+    doc["flujo"] = flu_s; 
+    String payload; serializeJson(doc, payload); 
+
+    wifiClient.setInsecure(); 
     if (http.begin(wifiClient, API_ENDPOINT)) { 
       http.addHeader("Content-Type", "application/json");
-      int httpCode = http.POST(payload);
-      
-      if (httpCode > 0) {
-        if(httpCode == 200) {
-          Serial.println(">> ¡¡ÉXITO!! Datos agregados a la DB.");
-        } else {
-          String responseBody = http.getString();
-          Serial.printf(">> Respuesta Servidor NO OK: %d - %s\n", httpCode, responseBody.c_str());
-          enviarLogDeError("API_FAILURE", responseBody.c_str()); 
-        }
+      int code = http.POST(payload);
+      if (code == 200) {
+        Serial.println(">> Enviado a Base de Datos.");
       } else {
-        String errorStr = http.errorToString(httpCode);
-        Serial.printf(">> ERROR: Fallo al llegar al servidor: %s\n", errorStr.c_str());
-        enviarLogDeError("CONNECTION_TIMEOUT", errorStr.c_str()); 
+        Serial.printf(">> Error API: %d\n", code);
+        if(code > 0) enviarLogDeError("API_FAILURE", http.getString().c_str());
       }
       http.end();
     } else {
-        Serial.println(">> ERROR CRÍTICO: Fallo al iniciar conexión HTTP/S.");
-        enviarLogDeError("HTTP_INIT_FAILED", "Fallo al iniciar conexión.");
+      enviarLogDeError("HTTP_INIT_FAILED", "No conectó a Render");
     }
   } else {
-    Serial.println("Reconectando WiFi...");
     WiFi.begin(ssid, password);
   }
-  Serial.println("Esperando 5 segundos...");
   delay(5000); 
 }
-
-
-
-
-
-
-
-
-
-
